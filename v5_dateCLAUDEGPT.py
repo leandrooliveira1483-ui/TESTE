@@ -156,6 +156,61 @@ def banner(t): print(f"\n{SEP}\n  {t}\n{SEP2}")
 def pct(v, d=1): return f"{v*100:.{d}f}%"
 
 
+def poisson_pmf_vector(lam: float, max_goals: int = 10) -> np.ndarray:
+    """
+    PMF de Poisson de 0..max_goals, com cauda agregada no último bucket.
+    Evita dependência extra e mantém estabilidade numérica para lambdas usuais de futebol.
+    """
+    lam = float(np.clip(lam, 1e-6, 10.0))
+    pmf = np.zeros(max_goals + 1, dtype=float)
+    pmf[0] = float(np.exp(-lam))
+    for k in range(1, max_goals + 1):
+        pmf[k] = pmf[k - 1] * lam / k
+    tail = max(0.0, 1.0 - float(pmf.sum()))
+    pmf[-1] += tail
+    return pmf
+
+
+def market_probs_from_xg(xg_home: float, xg_away: float, max_goals: int = 10) -> dict:
+    """
+    Converte xG esperado (mandante/visitante) em probabilidades de mercados
+    assumindo gols independentes ~ Poisson.
+    """
+    ph = poisson_pmf_vector(xg_home, max_goals=max_goals)
+    pa = poisson_pmf_vector(xg_away, max_goals=max_goals)
+    score_m = np.outer(ph, pa)  # linhas=home goals | colunas=away goals
+
+    p_home = float(np.tril(score_m, k=-1).sum())
+    p_draw = float(np.trace(score_m))
+    p_away = float(np.triu(score_m, k=1).sum())
+
+    i = np.arange(max_goals + 1).reshape(-1, 1)
+    j = np.arange(max_goals + 1).reshape(1, -1)
+    total = i + j
+
+    p_over_15 = float(score_m[total >= 2].sum())
+    p_over_25 = float(score_m[total >= 3].sum())
+    p_over_35 = float(score_m[total >= 4].sum())
+
+    non_draw = max(1e-9, 1.0 - p_draw)
+    p_dnb_home = float(p_home / non_draw)
+    p_dnb_away = float(p_away / non_draw)
+
+    return {
+        "p_1": p_home,
+        "p_x": p_draw,
+        "p_2": p_away,
+        "p_over_1_5": p_over_15,
+        "p_over_2_5": p_over_25,
+        "p_over_3_5": p_over_35,
+        "p_dnb_home": p_dnb_home,
+        "p_dnb_away": p_dnb_away,
+        "p_dc1x": p_home + p_draw,
+        "p_dcx2": p_draw + p_away,
+        "p_dc12": p_home + p_away,
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CARREGAMENTO — #1 #2: SEM PROXY, xG OBRIGATÓRIO
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2243,7 +2298,7 @@ def run_official_prediction_pipeline(pack: dict, n_folds: int = BACKTEST_N_FOLDS
     _, xg_a_raw, reg_ids_next = predict_away_regime_v5(away_bundle, next_aug)
     xg_h = bias_corrector.correct_h(xg_h_raw)
     xg_a = bias_corrector.correct_a(xg_a_raw)
-    print(f"  Modelo home: {mh_name} | modelo away: {away_bundle["base_name"]}+{away_bundle["resid_name"]}")
+    print(f"  Modelo home: {mh_name} | modelo away: {away_bundle['base_name']}+{away_bundle['resid_name']}")
     print(
         f"  Correção isotônica: home raw={xg_h_raw.mean():.3f} → {xg_h.mean():.3f} | "
         f"away raw={xg_a_raw.mean():.3f} → {xg_a.mean():.3f}"
@@ -2265,6 +2320,8 @@ def run_official_prediction_pipeline(pack: dict, n_folds: int = BACKTEST_N_FOLDS
     banner("STEP 5/5 — Previsão da próxima rodada")
     rows = []
     for i, (_, row) in enumerate(proxima.iterrows()):
+        probs = market_probs_from_xg(float(xg_h[i]), float(xg_a[i]), max_goals=10)
+        pick_1x2 = max([("1", probs["p_1"]), ("X", probs["p_x"]), ("2", probs["p_2"])], key=lambda x: x[1])[0]
         rows.append({
             "home": row["home"],
             "away": row["away"],
@@ -2288,6 +2345,18 @@ def run_official_prediction_pipeline(pack: dict, n_folds: int = BACKTEST_N_FOLDS
             "home_adv_fator": round(float(np.exp(
                 pack["team_ha"].get(row["home"], pack["base_home_log"]) - pack["base_away_log"]
             )), 3),
+            "pick_1x2": pick_1x2,
+            "p_1": round(probs["p_1"], 4),
+            "p_x": round(probs["p_x"], 4),
+            "p_2": round(probs["p_2"], 4),
+            "p_over_1_5": round(probs["p_over_1_5"], 4),
+            "p_over_2_5": round(probs["p_over_2_5"], 4),
+            "p_over_3_5": round(probs["p_over_3_5"], 4),
+            "p_dnb_mandante": round(probs["p_dnb_home"], 4),
+            "p_dnb_visitante": round(probs["p_dnb_away"], 4),
+            "p_dc1": round(probs["p_dc1x"], 4),
+            "p_dc2": round(probs["p_dcx2"], 4),
+            "p_dc12": round(probs["p_dc12"], 4),
         })
     df_pred = pd.DataFrame(rows)
 
@@ -2306,7 +2375,7 @@ def run_official_prediction_pipeline(pack: dict, n_folds: int = BACKTEST_N_FOLDS
         "df_bt": df_bt,
         "oof_df": oof_df,
         "bias_corrector": bias_corrector,
-        "model_name": f"{mh_name}+{away_bundle["base_name"]}+{away_bundle["resid_name"]}",
+        "model_name": f"{mh_name}+{away_bundle['base_name']}+{away_bundle['resid_name']}",
         "feat_cols": feat_union,
     }
 
