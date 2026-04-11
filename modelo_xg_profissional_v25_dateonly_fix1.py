@@ -6,7 +6,7 @@ Modelo profissional de previsão de xG da próxima rodada.
 Principais decisões desta versão:
 - Pipeline estritamente xG-first: não usa hg/ag como fallback nem como alvo auxiliar.
 - Quebra se hxg/axg estiverem ausentes no histórico.
-- Sem módulos de previsão de gols/mercados.
+- Mercados derivados exclusivamente do xG bruto previsto (xg_home_raw/xg_away_raw).
 - Priors da liga calculados incrementalmente no tempo, sem vazamento.
 - team_ha incremental por time, baseado em xG de jogos em casa, sem vazamento.
 - Ratings estruturais log-lineares em xG, com verificação de convergência.
@@ -123,6 +123,53 @@ def weighted_mean(values, decay=RECENT_DECAY):
     w = np.array([decay ** (n - 1 - i) for i in range(n)], dtype=float)
     arr = np.array(values, dtype=float)
     return float(np.average(arr, weights=w))
+
+
+def poisson_pmf_vector(lam: float, max_goals: int = 10) -> np.ndarray:
+    lam = float(np.clip(lam, 1e-6, 10.0))
+    pmf = np.zeros(max_goals + 1, dtype=float)
+    pmf[0] = float(np.exp(-lam))
+    for k in range(1, max_goals + 1):
+        pmf[k] = pmf[k - 1] * lam / k
+    tail = max(0.0, 1.0 - float(pmf.sum()))
+    pmf[-1] += tail
+    return pmf
+
+
+def market_probs_from_xg(xg_home: float, xg_away: float, max_goals: int = 10) -> dict:
+    ph = poisson_pmf_vector(xg_home, max_goals=max_goals)
+    pa = poisson_pmf_vector(xg_away, max_goals=max_goals)
+    score_m = np.outer(ph, pa)
+
+    p_home = float(np.tril(score_m, k=-1).sum())
+    p_draw = float(np.trace(score_m))
+    p_away = float(np.triu(score_m, k=1).sum())
+
+    i = np.arange(max_goals + 1).reshape(-1, 1)
+    j = np.arange(max_goals + 1).reshape(1, -1)
+    total = i + j
+
+    p_over_15 = float(score_m[total >= 2].sum())
+    p_over_25 = float(score_m[total >= 3].sum())
+    p_over_35 = float(score_m[total >= 4].sum())
+
+    non_draw = max(1e-9, 1.0 - p_draw)
+    p_dnb_home = float(p_home / non_draw)
+    p_dnb_away = float(p_away / non_draw)
+
+    return {
+        "p_1": p_home,
+        "p_x": p_draw,
+        "p_2": p_away,
+        "p_over_1_5": p_over_15,
+        "p_over_2_5": p_over_25,
+        "p_over_3_5": p_over_35,
+        "p_dnb_mandante": p_dnb_home,
+        "p_dnb_visitante": p_dnb_away,
+        "p_dc1": p_home + p_draw,   # 1X
+        "p_dc2": p_draw + p_away,   # X2
+        "p_dc12": p_home + p_away,  # 12
+    }
 
 
 # ==============================
@@ -1765,6 +1812,30 @@ def main(passadas_file=PASSADAS_FILE, atuais_file=ATUAIS_FILE, proxima_file=PROX
     df_pred["xg_home_rating"] = next_f["xg_rating_home"].values
     df_pred["xg_away_rating"] = next_f["xg_rating_away"].values
     df_pred["team_home_adv"] = next_f["team_home_adv"].values
+
+    market_rows = []
+    for _, r in df_pred.iterrows():
+        probs = market_probs_from_xg(float(r["xg_home_raw"]), float(r["xg_away_raw"]), max_goals=10)
+        probs["pick_1x2"] = max(
+            [("1", probs["p_1"]), ("X", probs["p_x"]), ("2", probs["p_2"])],
+            key=lambda x: x[1],
+        )[0]
+        market_rows.append(probs)
+    df_markets = pd.DataFrame(market_rows)
+    for c in [
+        "p_1", "p_x", "p_2",
+        "p_over_1_5", "p_over_2_5", "p_over_3_5",
+        "p_dnb_mandante", "p_dnb_visitante",
+        "p_dc1", "p_dc2", "p_dc12",
+    ]:
+        df_markets[c] = df_markets[c].round(4)
+    df_pred = pd.concat([df_pred, df_markets[[
+        "pick_1x2",
+        "p_1", "p_x", "p_2",
+        "p_over_1_5", "p_over_2_5", "p_over_3_5",
+        "p_dnb_mandante", "p_dnb_visitante",
+        "p_dc1", "p_dc2", "p_dc12",
+    ]]], axis=1)
 
     print("\nPrevisão da próxima rodada:")
     print(f"{'Mandante':<22} {'Visitante':<22} {'xG_M':>6} {'Q10':>6} {'Q90':>6} {'xG_V':>6} {'Q10':>6} {'Q90':>6}")
