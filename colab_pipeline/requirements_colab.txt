@@ -1,0 +1,13 @@
+# Dependências do pipeline
+pandas==2.2.3
+numpy==2.0.2
+scikit-learn==1.5.2
+openpyxl==3.1.5
+pyarrow==18.1.0
+soccerdata==1.8.7
+
+# Compatibilidade com runtime Google Colab
+requests==2.32.4
+urllib3>=2,<3
+rich>=12.4.4,<14
+jedi>=0.16
