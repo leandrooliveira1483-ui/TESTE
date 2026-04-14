@@ -109,11 +109,23 @@ def estimate_dixon_coles_rho(y_home: np.ndarray, y_away: np.ndarray, home_lambda
     p_away = poisson_probs(away_lambda)
     base_matrix = p_home[:, :, None] * p_away[:, None, :]
 
-    grid = np.linspace(-0.2, 0.2, 41)
+    # Busca em duas etapas: coarse + refinamento local (mais robusto que grid único fixo)
+    coarse = np.linspace(-0.2, 0.2, 81)
     best_rho = 0.0
     best_ll = -1e18
 
-    for rho in grid:
+    for rho in coarse:
+        adj = apply_dixon_coles_adjustment(base_matrix, home_lambda, away_lambda, float(rho))
+        ll = 0.0
+        for i in range(len(y_home)):
+            gh = int(min(max(y_home[i], 0), adj.shape[1] - 1))
+            ga = int(min(max(y_away[i], 0), adj.shape[2] - 1))
+            ll += math.log(max(adj[i, gh, ga], 1e-12))
+        if ll > best_ll:
+            best_ll = ll
+            best_rho = float(rho)
+    fine = np.linspace(best_rho - 0.02, best_rho + 0.02, 81)
+    for rho in fine:
         adj = apply_dixon_coles_adjustment(base_matrix, home_lambda, away_lambda, float(rho))
         ll = 0.0
         for i in range(len(y_home)):
@@ -231,6 +243,14 @@ def apply_calibration(prob_df: pd.DataFrame, calibrators: Dict[str, object], met
             out[f"{market}_cal"] = model.predict_proba(p.reshape(-1, 1))[:, 1]
         else:
             out[f"{market}_cal"] = model.predict(p)
+
+    # Re-normalização 1X2 após calibração (consistência probabilística)
+    cols_1x2 = ["p_home_win_cal", "p_draw_cal", "p_away_win_cal"]
+    if all(c in out.columns for c in cols_1x2):
+        s = out[cols_1x2].sum(axis=1).replace(0, np.nan)
+        out["p_home_win_cal"] = (out["p_home_win_cal"] / s).clip(1e-6, 1 - 1e-6)
+        out["p_draw_cal"] = (out["p_draw_cal"] / s).clip(1e-6, 1 - 1e-6)
+        out["p_away_win_cal"] = (out["p_away_win_cal"] / s).clip(1e-6, 1 - 1e-6)
     return out
 
 
@@ -352,9 +372,13 @@ def merge_odds_and_backtest(eval_df: pd.DataFrame, odds_file: str | None) -> tup
     merged = eval_df.merge(odds, on=key_cols, how="left")
 
     # Estratégia simples: aposta 1 unidade quando EV > 0
-    merged["ev_home"] = merged["p_home_win"] * merged["odds_home"] - 1
-    merged["ev_draw"] = merged["p_draw"] * merged["odds_draw"] - 1
-    merged["ev_away"] = merged["p_away_win"] * merged["odds_away"] - 1
+    p_home_col = "p_home_win_cal" if "p_home_win_cal" in merged.columns else "p_home_win"
+    p_draw_col = "p_draw_cal" if "p_draw_cal" in merged.columns else "p_draw"
+    p_away_col = "p_away_win_cal" if "p_away_win_cal" in merged.columns else "p_away_win"
+
+    merged["ev_home"] = merged[p_home_col] * merged["odds_home"] - 1
+    merged["ev_draw"] = merged[p_draw_col] * merged["odds_draw"] - 1
+    merged["ev_away"] = merged[p_away_col] * merged["odds_away"] - 1
 
     merged["bet_home"] = (merged["ev_home"] > 0).astype(int)
     merged["bet_draw"] = (merged["ev_draw"] > 0).astype(int)
@@ -384,6 +408,7 @@ def merge_odds_and_backtest(eval_df: pd.DataFrame, odds_file: str | None) -> tup
 
     report = {
         "n_matches_with_odds": int(merged["odds_home"].notna().sum()),
+        "prob_columns_used_for_ev": {"home": p_home_col, "draw": p_draw_col, "away": p_away_col},
         "total_bets": total_bets,
         "total_profit_units": total_profit,
         "roi": float(total_profit / total_bets) if total_bets > 0 else None,

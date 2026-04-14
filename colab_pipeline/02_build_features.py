@@ -9,6 +9,7 @@ Lê os dados brutos extraídos na etapa 01, gera features pré-jogo e salva em:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -101,7 +102,8 @@ def add_rolling_features(df: pd.DataFrame, window: int = 5) -> pd.DataFrame:
     out = df.copy()
     long_df = _team_long_table(out)
 
-    group_cols = ["team", "league"]
+    # Reset por temporada evita vazamento/artefatos entre temporadas (offseason)
+    group_cols = ["team", "league", "season"]
     metrics = ["goals_for", "goals_against", "xg_for", "xg_against", "ppda", "deep"]
 
     for m in metrics:
@@ -184,11 +186,20 @@ def save_outputs(df: pd.DataFrame) -> None:
     df.to_parquet(parquet_path, index=False)
     df.to_excel(xlsx_path, index=False)
 
+    quality_report = {
+        "n_rows": int(len(df)),
+        "n_duplicates_match_key": int(df.duplicated(subset=["date", "league", "home_team", "away_team"]).sum()),
+        "missing_rate_top_10": (df.isna().mean().sort_values(ascending=False).head(10).round(4)).to_dict(),
+    }
+    with open(PROCESSED_DIR / "data_quality_report.json", "w", encoding="utf-8") as f:
+        json.dump(quality_report, f, indent=2, ensure_ascii=False)
+
     print("=== Features concluídas ===")
     print(f"Dataset modelagem: {len(df):,} linhas")
     print(f"CSV: {csv_path}")
     print(f"Parquet: {parquet_path}")
     print(f"Excel: {xlsx_path}")
+    print(f"Qualidade: {PROCESSED_DIR / 'data_quality_report.json'}")
 
 
 if __name__ == "__main__":

@@ -62,6 +62,7 @@ Saídas:
 - `data/raw/understat_matches_raw.parquet`
 - `data/raw/understat_matches_raw.xlsx`
 - `data/raw/understat_summary_by_league_season.xlsx`
+- `data/raw/understat_schema_report.json` (validação de schema e missing)
 
 ### 2) Engenharia de atributos
 
@@ -73,6 +74,7 @@ Saídas:
 - `data/processed/model_dataset.csv`
 - `data/processed/model_dataset.parquet`
 - `data/processed/model_dataset.xlsx`
+- `data/processed/data_quality_report.json`
 
 ### 3) Treino + previsões dos mercados
 
@@ -112,6 +114,9 @@ Use esse modo para simular cenário real: treina até uma data e avalia/prediz a
 
 
 ### 3.2) Backtest com odds históricas (EV/ROI/CLV)
+
+> Observação: o `--odds-file` **não altera as previsões do modelo**. Ele só adiciona o backtest financeiro (EV/ROI/CLV) sobre as probabilidades já previstas.
+
 
 Crie um CSV (ex.: `data/external/odds.csv`) com colunas mínimas:
 - `date`, `league`, `home_team`, `away_team`

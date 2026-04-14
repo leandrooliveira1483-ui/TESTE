@@ -15,6 +15,7 @@ Antes de rodar no Colab:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import time
 from typing import Iterable, List
@@ -220,11 +221,22 @@ def save_outputs(df: pd.DataFrame) -> None:
     )
     summary.to_excel(RAW_DIR / "understat_summary_by_league_season.xlsx", index=False)
 
+    schema_report = {
+        "n_rows": int(len(df)),
+        "n_duplicates_match_key": int(df.duplicated(subset=["date", "league", "home_team", "away_team"]).sum()),
+        "missing_rate_top_10": (df.isna().mean().sort_values(ascending=False).head(10).round(4)).to_dict(),
+        "date_min": str(df["date"].min()),
+        "date_max": str(df["date"].max()),
+    }
+    with open(RAW_DIR / "understat_schema_report.json", "w", encoding="utf-8") as f:
+        json.dump(schema_report, f, indent=2, ensure_ascii=False)
+
     print("=== Extração concluída ===")
     print(f"Partidas: {len(df):,}")
     print(f"CSV:     {csv_path}")
     print(f"Parquet: {parquet_path}")
     print(f"Excel:   {xlsx_path}")
+    print(f"Schema:  {RAW_DIR / 'understat_schema_report.json'}")
 
 
 if __name__ == "__main__":
